@@ -1,6 +1,7 @@
 import User from '../models/User.js';
 import StudentProfile from '../models/StudentProfile.js';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 
 // Generate JWT token helper
 const generateToken = (id) => {
@@ -109,6 +110,95 @@ export const getMe = async (req, res, next) => {
     res.json({
       success: true,
       user,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Forgot password — generate reset token
+// @route   POST /api/auth/forgot-password
+// @access  Public
+export const forgotPassword = async (req, res, next) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      res.status(400);
+      throw new Error('Please provide an email address');
+    }
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      res.status(404);
+      throw new Error('No account found with that email address');
+    }
+
+    // Generate reset token (raw token returned to user, hashed stored in DB)
+    const resetToken = user.getResetPasswordToken();
+    await user.save({ validateBeforeSave: false });
+
+    // Build the reset URL — the frontend reset page URL
+    const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/reset-password/${resetToken}`;
+
+    res.json({
+      success: true,
+      message: 'Password reset link generated successfully.',
+      resetUrl, // In production this would be sent via email instead
+    });
+  } catch (error) {
+    // If something fails, clear the token fields so the user can try again
+    try {
+      const user = await User.findOne({ email: req.body.email });
+      if (user) {
+        user.resetPasswordToken = undefined;
+        user.resetPasswordExpire = undefined;
+        await user.save({ validateBeforeSave: false });
+      }
+    } catch (_) { /* ignore secondary error */ }
+    next(error);
+  }
+};
+
+// @desc    Reset password using token
+// @route   PUT /api/auth/reset-password/:resetToken
+// @access  Public
+export const resetPassword = async (req, res, next) => {
+  try {
+    const { password } = req.body;
+
+    if (!password || password.length < 6) {
+      res.status(400);
+      throw new Error('Password must be at least 6 characters');
+    }
+
+    // Hash the raw token from the URL to compare with the stored hashed token
+    const hashedToken = crypto
+      .createHash('sha256')
+      .update(req.params.resetToken)
+      .digest('hex');
+
+    // Find user with matching token that hasn't expired
+    const user = await User.findOne({
+      resetPasswordToken: hashedToken,
+      resetPasswordExpire: { $gt: Date.now() },
+    });
+
+    if (!user) {
+      res.status(400);
+      throw new Error('Invalid or expired reset token. Please request a new one.');
+    }
+
+    // Set the new password and clear the reset token fields
+    user.password = password;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpire = undefined;
+    await user.save();
+
+    res.json({
+      success: true,
+      message: 'Password reset successful. You can now log in with your new password.',
+      token: generateToken(user._id),
     });
   } catch (error) {
     next(error);
